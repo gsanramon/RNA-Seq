@@ -1,0 +1,424 @@
+---
+title: "RNA-Seq Analysis"
+author: "Geraldine San Ramon"
+date: "4/28/2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### Get the data after featureCounts.
+
+```{r}
+#Load the 6 sample data counts
+DMSO_REP1 <- read.delim("DMSO-REP1.tabular", check.names=FALSE, stringsAsFactors=FALSE)
+DMSO_REP2 <- read.delim("DMSO-REP2.tabular", check.names=FALSE, stringsAsFactors=FALSE)
+DMSO_REP3 <- read.delim("DMSO-REP3.tabular", check.names=FALSE, stringsAsFactors=FALSE)
+RA_REP1 <- read.delim("RA-REP1.tabular", check.names=FALSE, stringsAsFactors=FALSE)
+RA_REP2 <- read.delim("RA-REP2.tabular", check.names=FALSE, stringsAsFactors=FALSE)
+RA_REP3 <- read.delim("RA-REP3.tabular", check.names=FALSE, stringsAsFactors=FALSE)
+
+#merge in one table
+counts.data <- merge(merge(merge(merge(merge(
+  DMSO_REP1,
+  DMSO_REP2, all = TRUE),
+  DMSO_REP3, all = TRUE),
+  RA_REP1, all = TRUE),
+  RA_REP2, all = TRUE),
+  RA_REP3, all = TRUE)
+
+```
+
+### Prepare table for ensmbl to get the gene names of ensembl id (Geneid)
+
+```{r}
+#Remove number after the dot in ensembl id (Geneid) 
+counts.data$ensemblID <- gsub('\\..*', '', counts.data$Geneid) 
+head(counts.data)
+```
+
+### Get Gene names
+```{r}
+library(biomaRt)
+
+#convert ensmbl id to gene name
+ensembl_ids <- counts.data$ensemblID
+ensembl <- useEnsembl(biomart = "ensembl", dataset="mmusculus_gene_ensembl")
+gene_symbol <- getBM(attributes=c('ensembl_gene_id', 'external_gene_name', 'description'),filters = 'ensembl_gene_id', values = ensembl_ids, mart = ensembl)
+ 
+head(gene_symbol)
+```
+
+```{r}
+#Merge
+counts.data.gene <- merge(counts.data, gene_symbol, by.x="ensemblID", by.y="ensembl_gene_id", all.x = TRUE, all.y= FALSE, sort=FALSE)
+colnames(counts.data.gene)[9] <- 'gene_name'
+dim(counts.data.gene)
+head(counts.data.gene)
+#write.csv(counts.data.gene, 'counts.data.gene.csv')
+```
+
+
+### Format count data to only have the counts 
+
+```{r}
+#make row names the ensemble id
+counts <- counts.data.gene
+rownames(counts) <- counts.data.gene$ensemblID
+
+#remove geneid column
+counts.only <- counts[,3:8]
+head(counts.only)
+```
+
+### Cretae a DGElist object
+
+```{r}
+library(edgeR)
+
+group <- factor(c("DMSO","DMSO","DMSO","RA","RA","RA"))
+y <- DGEList(counts=counts.only, group=group, genes = counts.data.gene$gene_name)
+y
+```
+
+Filter out lowly expressed genes
+
+```{r}
+#Get counts per million
+myCPM <- cpm(counts.only)
+head(myCPM)
+```
+
+Set threshold to 0.5 which is ~10-15 counts
+
+```{r}
+#values > 0.5
+thresh <- myCPM > 0.5
+head(thresh)
+```
+
+How many genes pass the threshold
+```{r}
+table(rowSums(thresh))
+```
+
+Keep genes where threshold is true for 3 rows (3 replicates)
+
+```{r}
+keep <- rowSums(thresh) >= 3
+summary(keep)
+```
+
+There are 18,166 genes that passed the threshold.
+
+
+Check counts vs cpm for sample 1 (DMSO-REP1)
+```{r}
+plot(myCPM[,1],counts.only[,1])
+```
+
+
+```{r}
+# Zoom in 
+plot(myCPM[,1],counts.only[,1],ylim=c(0,50),xlim=c(0,3))
+# Add a vertical line at 0.5 CPM
+abline(v=0.5)
+```
+
+Keep genes that pass threshold only
+
+```{r}
+y <- y[keep, keep.lib.sizes=FALSE]
+#check how many reads for each sample
+y$samples
+```
+
+Check descrepencies b/w samples
+
+```{r}
+barplot(y$samples$lib.size,names=colnames(y),las=2)
+title("Barplot of library sizes")
+```
+
+RA-REP2 have very low counts.
+
+#Log counts per million
+
+```{r}
+# Get log2 counts per million
+logcounts <- cpm(y,log=TRUE)
+# Check distributions of samples using boxplots
+boxplot(logcounts, xlab="", ylab="Log2 counts per million",las=2)
+# Add a blue horizontal line that corresponds to the median logCPM
+abline(h=median(logcounts),col="blue")
+title("Boxplots of logCPMs (unnormalised)")
+```
+
+Check variation in data
+
+```{r}
+plotMDS(y, method="bcv", col=as.numeric(y$samples$group))
+legend("bottomleft", as.character(unique(y$samples$group)), col=1:3, pch=20)
+```
+
+The 2 groups (DMSO & RA) are separated well. Although RA samples are scattered.
+
+```{r}
+# Estimate the variance for each row in the logcounts matrix
+var_genes <- apply(logcounts, 1, var)
+head(var_genes)
+```
+
+Get the top 100 most variable genes
+
+```{r}
+select_var <- names(sort(var_genes, decreasing=TRUE))[1:100]
+head(select_var)
+```
+
+```{r}
+# Subset logcounts matrix
+highly_variable_lcpm <- logcounts[select_var,]
+dim(highly_variable_lcpm)
+```
+
+```{r}
+head(highly_variable_lcpm, 10)
+```
+
+The 2 top genes show that RA-Replicate2 has very high spike compared to the other samples and to the other 2 replicates. Same with genes 4-6 (ENSMUSG00000098973, ENSMUSG00000035202 and ENSMUSG00000086324).
+
+So I went back to FastQC of RA_REP2. This replicate has a lot of overrepresnted sequences that may explain this. It's also possible that this sample is contaminated. So I'm going to remove this from the analysis and re-analyze without RA-REP2.
+
+### Create another DEGlist without RA-REP2
+
+```{r}
+counts.only.2 <- counts.only[,c(1:4,6)]
+head(counts.only.2)
+```
+
+
+```{r}
+group2 <- factor(c("DMSO","DMSO","DMSO","RA","RA"))
+y2 <- DGEList(counts=counts.only.2, group=group2, genes = counts.data.gene$gene_name)
+y2
+```
+
+### Counts per million
+
+```{r}
+# Get log2 counts per million
+logcounts2 <- cpm(y2, log=TRUE)
+# Check distributions of samples using boxplots
+boxplot(logcounts2, xlab="", ylab="Log2 counts per million", las=2)
+# add a blue horizontal line that corresponds to the median logCPM
+abline(h=median(logcounts),col="blue")
+title("Boxplots of logCPMs (unnormalised)")
+```
+
+Check variation in data
+
+```{r}
+plotMDS(y2, method="bcv", col=as.numeric(y2$samples$group))
+legend("bottomleft", as.character(unique(y2$samples$group)), col=1:3, pch=20)
+```
+
+The 2 groups are separated well.
+
+```{r}
+# We estimate the variance for each row in the logcounts matrix
+var_genes2 <- apply(logcounts2, 1, var)
+head(var_genes2)
+```
+
+Get the top 100 most variable genes
+
+```{r}
+select_var2 <- names(sort(var_genes2, decreasing=TRUE))[1:100]
+head(select_var2)
+```
+
+```{r}
+# Subset logcounts matrix
+highly_variable_lcpm_2 <- logcounts2[select_var2,]
+dim(highly_variable_lcpm_2)
+```
+
+```{r}
+head(highly_variable_lcpm_2, 10)
+```
+
+Apply normalisation
+
+```{r}
+y2 <- calcNormFactors(y2)
+y2$samples
+```
+
+Use voom to transform data into log counts per million. Will use logCPM instead of counts.
+
+```{r}
+design <- model.matrix(~group2, data=y2$samples)
+colnames(design) <- levels(y2$samples$group)
+design
+v <- voom(y2, design, plot = TRUE)
+v
+```
+
+
+```{r}
+boxplot(v$E, xlab="", ylab="Log2 counts per million",las=2,main="logCPM (Normalised)")
+#blue horizontal line that corresponds to the median logCPM
+abline(h=median(v$E),col="blue")
+```
+
+
+```{r}
+fit1 <- lmFit(v)
+fit1 <- eBayes(fit1)
+topTable(fit1,coef=2,30)
+```
+
+
+## Heatmap
+
+
+```{r}
+library(gplots)
+library(RColorBrewer)
+mypalette <- brewer.pal(11,"RdYlBu")
+morecols <- colorRampPalette(mypalette)
+# Set up colour vector for celltype variable
+col.cell <- c("purple","orange")[group2]
+
+top.30 <- topTable(fit1,coef=2,30)
+top.30.idx <- match(rownames(top.30), rownames(v$E))
+top.30.cpm <- v$E[top.30.idx,]
+top.30.df <- merge(top.30, top.30.cpm, by=0, all.x = TRUE, all.y= FALSE, sort=FALSE)
+
+heatmap.2(as.matrix(top.30.df[,9:13]), col=rev(morecols(50)), trace="none", main="Top 30 DEGs", ColSideColors=col.cell, scale="row", margins=c(2,10), labRow=top.30.df$genes, cexRow = 0.8, cexCol = 1, srtCol=0, adjCol = c(0.5,0.5))
+```
+
+
+
+Count the number of genes with FDR < 5%
+```{r}
+
+results <- topTable(fit1, coef=2, number = nrow(y2$counts), sort.by = "p") 
+head(results)
+sum(results$adj.P.Val < .05)
+ 
+```
+
+3195 genes have 5%FDR.
+
+
+
+### Differential expression using edgeR  
+
+```{r}
+group2 <- factor(c("DMSO","DMSO","DMSO","RA","RA"))
+y2e <- DGEList(counts=counts.only.2, group=group2, genes = counts.data.gene$gene_name)
+y2e
+```
+
+
+```{r}
+#filter out lowly expressed genes
+keep2 <- filterByExpr(y2e, group=group2)
+table(keep2)
+```
+
+```{r}
+#filter out genes with no annotations (NA in gene_names)
+y2e <- y2e[keep2, , keep.lib.sizes=FALSE]
+dim(y2e)
+```
+
+18860 genes after filtering.
+
+Apply TMM normalization to account for the composition biases.
+
+```{r}
+y2e <- calcNormFactors(y2e)
+head(y2e$samples)
+```
+
+Estimate dispersion
+```{r}
+design2 <- model.matrix(~group2, data=y2e$samples)
+colnames(design2) <- levels(y2e$samples$group)
+design2
+y2e <- estimateDisp(y2e, design2, robust=TRUE)
+plotBCV(y2e)
+```
+
+
+Using QL F-test instead of exact test
+```{r}
+fit2 <- glmQLFit(y2e, design2, robust=TRUE, coef=2)
+fit2
+plotQLDisp(fit2)
+```
+
+```{r}
+qlf <- glmQLFTest(fit2)
+topTags(qlf,30)
+```
+Count the number of genes with FDR < 5%
+```{r}
+results_edgeR <- topTags(qlf, n = nrow(y2e$counts), sort.by = "PValue")
+head(results_edgeR$table)
+sum(results_edgeR$table$FDR < .05)
+```
+
+4823 genes with 5% FDR
+
+```{r}
+plotSmear(qlf, de.tags = rownames(results_edgeR)[results_edgeR$table$FDR < .05])
+abline(h = c(-2, 2), col = "blue")
+```
+
+
+### Heatmap
+
+```{r}
+#same color palette as above
+# Set up colour vector for celltype variable
+col.cell <- c("purple","orange")[group2]
+
+etop.30 <- topTags(qlf,30)
+etop.30.idx <- match(rownames(etop.30), rownames(y2e$counts))
+etop.30.cpm <- y2e$counts[etop.30.idx,]
+etop.30.df <- merge(etop.30, etop.30.cpm, by=0, all.x = TRUE, all.y= FALSE, sort=FALSE)
+
+heatmap.2(as.matrix(etop.30.df[,8:12]), col=rev(morecols(50)), trace="none", main="Top 30 DEGs", ColSideColors=col.cell, scale="row", margins=c(2,10), labRow=top.30.df$genes, cexRow = 0.8, cexCol = 1, srtCol=0, adjCol = c(0.5,0.5))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
